@@ -1,98 +1,114 @@
+import fpdf
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from PIL import Image
+import os
 
-def mean_filter(image, kernel_size=3):
-    """
-    Apply mean filter to the input image.
-    
-    Parameters:
-    image (numpy.ndarray): Input image array.
-    kernel_size (int): Size of the mean filter kernel.
-    
-    Returns:
-    numpy.ndarray: Denoised image.
-    """
-    # Convert image to float32 for better precision
-    image = image.astype(np.float32)
-    
-    # Define the kernel
-    kernel = np.ones((kernel_size, kernel_size), dtype=np.float32) / (kernel_size * kernel_size)
-    
-    # Get the image dimensions
-    height, width, channels = image.shape
-    
-    # Initialize the output image
-    denoised_image = np.zeros((height, width, channels), dtype=np.float32)
-    
-    # Pad the image to handle borders
-    pad_size = kernel_size // 2
-    padded_image = np.pad(image, ((pad_size, pad_size), (pad_size, pad_size), (0, 0)), mode='reflect')
-    
-    # Apply the mean filter
-    for y in range(height):
-        for x in range(width):
-            for c in range(channels):
-                region = padded_image[y:y + kernel_size, x:x + kernel_size, c]
-                denoised_image[y, x, c] = np.sum(region * kernel)
-    
-    # Clip the values to be in the valid range
-    denoised_image = np.clip(denoised_image, 0, 255)
-    
-    # Convert back to uint8
-    denoised_image = denoised_image.astype(np.uint8)
-    
-    return denoised_image
+# Define a deeper DnCNN model for potentially better denoising
+class DnCNN(nn.Module):
+    def __init__(self, channels, num_of_layers=25):
+        super(DnCNN, self).__init__()
+        kernel_size = 3
+        padding = 1
+        features = 64
+        layers = []
+        layers.append(nn.Conv2d(in_channels=channels, out_channels=features, kernel_size=kernel_size, padding=padding, bias=False))
+        layers.append(nn.ReLU(inplace=True))
+        for _ in range(num_of_layers - 2):
+            layers.append(nn.Conv2d(in_channels=features, out_channels=features, kernel_size=kernel_size, padding=padding, bias=False))
+            layers.append(nn.BatchNorm2d(features))
+            layers.append(nn.ReLU(inplace=True))
+        layers.append(nn.Conv2d(in_channels=features, out_channels=channels, kernel_size=kernel_size, padding=padding, bias=False))
+        self.dncnn = nn.Sequential(*layers)
 
+    def forward(self, x):
+        out = self.dncnn(x)
+        return out
+
+# Adjust transform for better training
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.RandomHorizontalFlip(),  # Example of data augmentation
+    transforms.ToTensor(),
+])
+
+# Load dataset and dataloader
+image_paths = [os.path.join('/content/drive/MyDrive/project/', img) for img in os.listdir('/content/drive/MyDrive/project/') if img.endswith(('.jpg', '.jpeg', '.png'))]
+dataset = ImageDataset(image_paths, transform=transform)
+dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4)
+
+# Device configuration
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Initialize model, criterion, and optimizer
+model = DnCNN(channels=3).to(device)
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Training loop
+num_epochs = 50
+noise_factor = 25
+for epoch in range(num_epochs):
+    for data in dataloader:
+        model.train()
+        optimizer.zero_grad()
+        data = data.to(device)
+        noisy_data = add_noise(data, noise_factor).to(device)
+        output = model(noisy_data)
+        loss = criterion(output, data - noisy_data)
+        loss.backward()
+        optimizer.step()
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+# Save trained model
+torch.save(model.state_dict(), 'dncnn.pth')
+
+# Function to denoise image using the trained model
+def denoise_image(model, noisy_image):
+    model.eval()
+    with torch.no_grad():
+        noisy_image = noisy_image.to(device)
+        output = model(noisy_image)
+        denoised_image = noisy_image - output
+    return denoised_image.cpu()
+
+# Function to calculate PSNR
 def calculate_psnr(original, denoised):
-    """
-    Calculate the PSNR (Peak Signal-to-Noise Ratio) between two images.
-    
-    Parameters:
-    original (numpy.ndarray): Original image array.
-    denoised (numpy.ndarray): Denoised image array.
-    
-    Returns:
-    float: PSNR value.
-    """
-    mse = np.mean((original - denoised) ** 2)
-    if mse == 0:
-        return float('inf')
-    max_pixel = 255.0
-    psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
-    return psnr
+    mse = torch.mean((original - denoised.to(original.device)) ** 2)
+    max_pixel = 1.0
+    psnr = 20 * torch.log10(max_pixel / torch.sqrt(mse))
+    return psnr.item()
 
-def denoise_image(input_image_path, output_image_path, kernel_size=3):
-    # Read the image
-    image = np.array(Image.open(input_image_path))
-    
-    # Apply the mean filter
-    denoised_image = mean_filter(image, kernel_size)
-    
-    # Save the denoised image
-    denoised_image_pil = Image.fromarray(denoised_image)
-    denoised_image_pil.save(output_image_path)
-    
-    # Display the original and denoised images using matplotlib
-    plt.figure(figsize=(10, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.title("Original Image")
-    plt.imshow(image)
-    plt.axis('off')
-    
-    plt.subplot(1, 2, 2)
-    plt.title("Denoised Image")
-    plt.imshow(denoised_image)
-    plt.axis('off')
-    
+# Load the trained model
+model.load_state_dict(torch.load('dncnn.pth'))
+
+# Test the model on a noisy image
+test_image_path = '/content/drive/MyDrive/project/Figure-21-original-image-and-noisy-images-a-Original-image-without-noise-b-Image.jpg'
+test_image = Image.open(test_image_path).convert('RGB')
+test_image = transform(test_image).unsqueeze(0).to(device)  # Add batch dimension
+noisy_test_image = add_noise(test_image, noise_factor)
+
+# Denoise the image
+denoised_image = denoise_image(model, noisy_test_image)
+
+# Calculate PSNR
+psnr = calculate_psnr(test_image, denoised_image)
+print(f'PSNR: {psnr:.2f} dB')
+
+# Display the images
+def show_images(noisy, denoised):
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+    ax[0].imshow(noisy.squeeze().cpu().permute(1, 2, 0))
+    ax[0].set_title('Noisy Image')
+    ax[0].axis('off')
+    ax[1].imshow(denoised.squeeze().permute(1, 2, 0))
+    ax[1].set_title('Denoised Image')
+    ax[1].axis('off')
     plt.show()
-    
-    # Calculate PSNR
-    psnr_value = calculate_psnr(image, denoised_image)
-    print(f'PSNR Value: {psnr_value:.2f} dB')
 
-# Example usage
-input_image_path = 'Figure-21-original-image-and-noisy-images-a-Original-image-without-noise-b-Image.jpg'  # Path to the input image
-output_image_path = 'output.jpg'  # Path to save the denoised image
-denoise_image(input_image_path, output_image_path)
+show_images(noisy_test_image, denoised_image)
