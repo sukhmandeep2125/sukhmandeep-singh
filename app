@@ -44,6 +44,24 @@ def mean_filter(image, kernel_size=3):
     
     return denoised_image
 
+def calculate_psnr(original, denoised):
+    """
+    Calculate the PSNR (Peak Signal-to-Noise Ratio) between two images.
+    
+    Parameters:
+    original (numpy.ndarray): Original image array.
+    denoised (numpy.ndarray): Denoised image array.
+    
+    Returns:
+    float: PSNR value.
+    """
+    mse = np.mean((original - denoised) ** 2)
+    if mse == 0:
+        return float('inf')
+    max_pixel = 255.0
+    psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
+    return psnr
+
 def denoise_image(input_image_path, output_image_path, kernel_size=3):
     # Read the image
     image = np.array(Image.open(input_image_path))
@@ -69,9 +87,12 @@ def denoise_image(input_image_path, output_image_path, kernel_size=3):
     plt.axis('off')
     
     plt.show()
+    
+    # Calculate PSNR
+    psnr_value = calculate_psnr(image, denoised_image)
+    print(f'PSNR Value: {psnr_value:.2f} dB')
 
 # Example usage
 input_image_path = 'Figure-21-original-image-and-noisy-images-a-Original-image-without-noise-b-Image.jpg'  # Path to the input image
 output_image_path = 'output.jpg'  # Path to save the denoised image
 denoise_image(input_image_path, output_image_path)
-
